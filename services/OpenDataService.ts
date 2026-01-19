@@ -8,7 +8,8 @@ import { GEO_ECONOMICS, GeoProfile } from '../data/open_data/geo_economics';
 import { MACRO_INDICATORS, CATEGORY_BASE_RATES } from '../data/open_data/macro_indicators';
 import { lexiconService } from './LexiconService';
 import { DecisionUnit } from '../types';
-import { PRISM_POLICY } from '../data/prism_policy'; // Import Policy
+import { PRISM_POLICY } from '../data/prism_policy'; 
+import { EconomicPhysics } from '../data/physics/coefficients';
 
 export interface SocioEconomicCoordinates {
   income_percentile: number; // 0-100
@@ -31,7 +32,7 @@ class OpenDataService {
    * Get estimated salary based on Job Title and Age
    */
   public getEstimatedSalary(jobKey: string, ageKey: string): number | null {
-    const jobData = OCCUPATION_SALARY_DB[jobKey];
+    const jobData = OCCUPATION_SALARY_DB.data[jobKey];
     if (!jobData) return null;
 
     const curve = SENIORITY_CURVE[jobData.curve_type] || SENIORITY_CURVE.flat;
@@ -45,7 +46,7 @@ class OpenDataService {
    */
   public calculateSocialStanding(age: string, monthlyIncome: number, jobKey?: string): SocioEconomicCoordinates {
     const ageKey = mapAgeToBracket(age);
-    const bracket = TAX_BRACKETS_2023[ageKey] || TAX_BRACKETS_2023['30-34'];
+    const bracket = TAX_BRACKETS_2023.data[ageKey] || TAX_BRACKETS_2023.data['30-34'];
     
     // Default: Estimate from monthly * 13.5
     let annualIncome = monthlyIncome * 13.5; 
@@ -103,7 +104,7 @@ class OpenDataService {
     const maxVal = Math.max(...hourlyCounts) || 1;
     const inputVector = hourlyCounts.map(v => (v / maxVal) * 100);
 
-    const results = Object.values(OCCUPATION_TIME_PRINTS).map(profile => {
+    const results = Object.values(OCCUPATION_TIME_PRINTS.data).map(profile => {
       const similarity = this.cosineSimilarity(inputVector, profile.hourly_weights);
       const score = similarity * 100;
       return { match: profile, confidence: Math.round(score) };
@@ -118,8 +119,6 @@ class OpenDataService {
   public getTimeProfileByRole(roleInput: string): TimeProfile {
       const lexResult = lexiconService.analyzeInput(roleInput);
       const labor = lexResult.coordinates.labor;
-      // const sector = lexResult.coordinates.sector;
-      // const incomeClass = lexResult.coordinates.income_class;
       const roleLower = roleInput.toLowerCase();
 
       let profileId = "standard_9to5"; 
@@ -153,7 +152,7 @@ class OpenDataService {
           profileId = "tech_crunch_dev";
       }
 
-      return OCCUPATION_TIME_PRINTS[profileId] || OCCUPATION_TIME_PRINTS["standard_9to5"];
+      return OCCUPATION_TIME_PRINTS.data[profileId] || OCCUPATION_TIME_PRINTS.data["standard_9to5"];
   }
 
   // === NEW: Prism 5.0 Policy-Driven Logic ===
@@ -185,10 +184,6 @@ class OpenDataService {
       else if (isDurable) selectedPolicy = amortization.durable;
       else if (isSemiDurable) selectedPolicy = amortization.semi_durable;
 
-      // Formula: Price / (BaseMonths / PainDiscount)
-      // Pain Discount makes it feel cheaper (longer psychological spread)
-      // Actually, simple burden = Price / BaseMonths. PainDiscount is handled in AI/EV score.
-      // But to be safe for Hard Wall checks, we use BaseMonths directly.
       return Math.round(price / selectedPolicy.base_months);
   }
 
@@ -222,20 +217,20 @@ class OpenDataService {
    */
   public inferHouseholdStructure(role: string, age: string): HouseholdProfile {
       // Simple inference for now
-      if (role.includes('獨居') || role.includes('單身')) return HOUSEHOLD_STRUCTURES['solo_nomad'];
-      if (role.includes('頂客') || (role.includes('婚') && !role.includes('子'))) return HOUSEHOLD_STRUCTURES['dinks'];
-      if (role.includes('媽') || role.includes('爸') || role.includes('家長')) return HOUSEHOLD_STRUCTURES['nuclear_family'];
-      if (role.includes('三代') || role.includes('顧老')) return HOUSEHOLD_STRUCTURES['sandwich_class'];
-      if (parseInt(age) > 50 && (role.includes('退休'))) return HOUSEHOLD_STRUCTURES['empty_nest'];
-      return HOUSEHOLD_STRUCTURES['solo_nomad']; // Default fallback
+      if (role.includes('獨居') || role.includes('單身')) return HOUSEHOLD_STRUCTURES.data['solo_nomad'];
+      if (role.includes('頂客') || (role.includes('婚') && !role.includes('子'))) return HOUSEHOLD_STRUCTURES.data['dinks'];
+      if (role.includes('媽') || role.includes('爸') || role.includes('家長')) return HOUSEHOLD_STRUCTURES.data['nuclear_family'];
+      if (role.includes('三代') || role.includes('顧老')) return HOUSEHOLD_STRUCTURES.data['sandwich_class'];
+      if (parseInt(age) > 50 && (role.includes('退休'))) return HOUSEHOLD_STRUCTURES.data['empty_nest'];
+      return HOUSEHOLD_STRUCTURES.data['solo_nomad']; // Default fallback
   }
 
   public inferGeoProfile(role: string, incomeLabel: string): GeoProfile {
-      if (incomeLabel === 'Elite' || role.includes('天龍')) return GEO_ECONOMICS['taipei_core'];
-      if (role.includes('通勤') || role.includes('林口')) return GEO_ECONOMICS['commuter_belt'];
-      if (role.includes('竹科') || role.includes('工程師')) return GEO_ECONOMICS['tech_hub'];
-      if (role.includes('南部') || role.includes('台中') || role.includes('高雄')) return GEO_ECONOMICS['comfort_zone'];
-      return GEO_ECONOMICS['commuter_belt']; // Default fallback
+      if (incomeLabel === 'Elite' || role.includes('天龍')) return GEO_ECONOMICS.data['taipei_core'];
+      if (role.includes('通勤') || role.includes('林口')) return GEO_ECONOMICS.data['commuter_belt'];
+      if (role.includes('竹科') || role.includes('工程師')) return GEO_ECONOMICS.data['tech_hub'];
+      if (role.includes('南部') || role.includes('台中') || role.includes('高雄')) return GEO_ECONOMICS.data['comfort_zone'];
+      return GEO_ECONOMICS.data['commuter_belt']; // Default fallback
   }
 
   // === PRISM 8.0: Reality-Anchored Logic ===
@@ -245,7 +240,7 @@ class OpenDataService {
    * Returns a float (e.g., 0.8 to 1.1)
    */
   public getMacroMultiplier(): number {
-      const { CCI_SCORE, CPI_YOY } = MACRO_INDICATORS;
+      const { CCI_SCORE, CPI_YOY } = MACRO_INDICATORS.data;
       
       // Base is 1.0
       let multiplier = 1.0;
@@ -265,14 +260,14 @@ class OpenDataService {
   }
 
   /**
-   * Calculate Affordability Ratio (M_micro)
+   * Calculate Affordability Ratio (M_micro) using Physics Engine
    * @param monthlyBurden The amortized monthly cost of the product
    * @param incomeTierKey Key from TAX_BRACKETS ('Survival', 'Tight', etc.)
    * @returns A float between 0.0 (Impossible) and 1.0 (Easy)
    */
   public calculateAffordability(monthlyBurden: number, incomeTierKey: string, ageRange: string = "30-34"): number {
-      // 1. Get Median Disposable Income for the Tier
-      const bracket = TAX_BRACKETS_2023[mapAgeToBracket(ageRange)];
+      // 1. Get Median Disposable Income for the Tier (Approx)
+      const bracket = TAX_BRACKETS_2023.data[mapAgeToBracket(ageRange)];
       let annualIncome = bracket.median; // Default
 
       switch (incomeTierKey) {
@@ -283,29 +278,19 @@ class OpenDataService {
           case 'Elite': annualIncome = bracket.p99; break;
       }
 
-      // Convert to Monthly Disposable (Assume 70% retention after tax/rent for simplicity in this abstract model)
-      // Ideally this should use the full logic from getSocioEconomicContext, but here we need a quick scalar.
-      const monthlyDisposable = (annualIncome / 13.5) * 0.7;
+      // Convert to Monthly Disposable (Using simplified physics constants for speed)
+      // Base Tax Retention = 0.88
+      // Rent Burden Avg = 0.35 (General)
+      // Retention = 0.88 * (1 - 0.35) = 0.57
+      const monthlyDisposable = (annualIncome / 13.5) * 0.57;
 
-      // 2. Calculate Ratio
-      // Ratio = Product Cost / Disposable Income
-      const ratio = monthlyBurden / monthlyDisposable;
+      // 2. Use Physics Engine to calculate Resistance
+      const resistance = EconomicPhysics.calculatePurchaseResistance(monthlyBurden, monthlyDisposable);
 
-      // 3. Sigmoid Penalty Function
-      // If Ratio < 5% (0.05) -> No penalty (1.0)
-      // If Ratio > 30% (0.30) -> High penalty
-      // If Ratio > 60% (0.60) -> Near zero
-      
-      if (ratio <= 0.05) return 1.0;
-      if (ratio >= 1.0) return 0.01; // Can't afford at all (1% chance of irrational debt)
-
-      // Linear interpolation for simplicity between 0.05 and 0.6
-      // 0.05 -> 1.0
-      // 0.60 -> 0.1
-      // Slope = (0.1 - 1.0) / (0.6 - 0.05) = -0.9 / 0.55 = -1.63
-      const score = 1.0 - ((ratio - 0.05) * 1.63);
-      
-      return Math.max(0.01, Math.min(1.0, score));
+      // 3. Invert Resistance to get Affordability (0-1)
+      // Resistance 100 -> Affordability 0
+      // Resistance 5 -> Affordability 0.95
+      return Math.max(0.01, (100 - resistance) / 100);
   }
 
   public getCategoryBaseRate(category: string): number {
@@ -320,11 +305,11 @@ class OpenDataService {
 
   // Expose options for UI
   public getGeoOptions() {
-      return Object.values(GEO_ECONOMICS);
+      return Object.values(GEO_ECONOMICS.data);
   }
 
   public getHouseholdOptions() {
-      return Object.values(HOUSEHOLD_STRUCTURES);
+      return Object.values(HOUSEHOLD_STRUCTURES.data);
   }
 }
 

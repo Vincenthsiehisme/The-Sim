@@ -6,6 +6,7 @@ import { TAX_BRACKETS_2023, mapAgeToBracket } from './open_data/income_distribut
 import { LaborMode, IndustrySector } from './job_lexicon';
 import { GEO_ECONOMICS } from './open_data/geo_economics';
 import { HOUSEHOLD_STRUCTURES } from './open_data/household_structure';
+import { EconomicPhysics } from './physics/coefficients';
 
 // ==========================================
 // TAIWAN SOCIOLOGICAL KNOWLEDGE BASE (v4.3 - Refined Roles)
@@ -257,6 +258,7 @@ const detectRealityCheck = (
 /**
  * Calculates the "Sociological Coordinates" using the new Open Data Layer.
  * UPDATED v4.4: Supports "Priority Override" for Context Settings.
+ * UPDATED v5.0: Integrated Economic Physics for True FCF calculation.
  */
 export const getSocioEconomicContext = (
     ageBucket: string, 
@@ -283,19 +285,19 @@ export const getSocioEconomicContext = (
 
     // 2. Open Data Integration (Income)
     const ageKey = mapAgeToBracket(ageBucket);
-    const bracket = TAX_BRACKETS_2023[ageKey];
+    const bracket = TAX_BRACKETS_2023.data[ageKey];
     
     const stats = {
-        p25: Math.round(bracket.p25 / 13.5),
-        median: Math.round(bracket.median / 13.5),
-        p90: Math.round(bracket.p90 / 13.5)
+        p25: Math.round(bracket.p25 / EconomicPhysics.CONSTANTS.MONTHS_PER_YEAR),
+        median: Math.round(bracket.median / EconomicPhysics.CONSTANTS.MONTHS_PER_YEAR),
+        p90: Math.round(bracket.p90 / EconomicPhysics.CONSTANTS.MONTHS_PER_YEAR)
     };
 
     const multiplier = sectorDef.income_multiplier || 1.0;
     const baseAmount = Math.round(stats.median * multiplier);
 
     // 3. HARD DATA OVERRIDE (Gross Income)
-    let annualGross = baseAmount * 13.5;
+    let annualGross = baseAmount * EconomicPhysics.CONSTANTS.MONTHS_PER_YEAR;
     if (salaryKey) {
         const realAnnual = openDataService.getEstimatedSalary(salaryKey, ageKey);
         if (realAnnual) {
@@ -325,47 +327,51 @@ export const getSocioEconomicContext = (
     
     // 1. Household Logic: Priority Routing
     let household;
-    if (overrides?.household_id && HOUSEHOLD_STRUCTURES[overrides.household_id]) {
-        household = HOUSEHOLD_STRUCTURES[overrides.household_id];
+    if (overrides?.household_id && HOUSEHOLD_STRUCTURES.data[overrides.household_id]) {
+        household = HOUSEHOLD_STRUCTURES.data[overrides.household_id];
     } else {
         household = openDataService.inferHouseholdStructure(roleInput, ageBucket);
     }
 
     // 2. Geo Logic: Priority Routing
     let geo;
-    if (overrides?.geo_id && GEO_ECONOMICS[overrides.geo_id]) {
-        geo = GEO_ECONOMICS[overrides.geo_id];
+    if (overrides?.geo_id && GEO_ECONOMICS.data[overrides.geo_id]) {
+        geo = GEO_ECONOMICS.data[overrides.geo_id];
     } else {
         geo = openDataService.inferGeoProfile(roleInput, incomeModifierLabel);
     }
 
-    // 5. TRUE FREE CASH FLOW CALCULATION
-    // Formula: Gross * BurdenMod * FamilyMod * CostMod
-    // Note: CostMod (Geo) primarily affects rent/housing, which is ~30-40% of income.
+    // 5. TRUE FREE CASH FLOW CALCULATION (PHYSICS ENGINE v2.0)
+    // Formula: (MonthlyGross * TaxRate * GeoHousingRetention * FamilyRetention) - SurvivalFloor
     
-    // Effective tax/burden base (0.7 ~ 0.9)
-    const baseRetention = 0.8 * disposableMultiplier;
+    const monthlyGross = (annualGross / 12) * disposableMultiplier;
+    
+    // Effective tax/burden base (0.88 from physics constants)
+    const afterTax = monthlyGross * EconomicPhysics.CONSTANTS.BASE_TAX_RETENTION;
     
     // Family Impact (Discretionary factor from household structure)
     // E.g. Sandwich class = 0.25 (Very low discretionary)
     const familyRetention = household.discretionary_factor;
 
-    // Geo Impact (Cost of living adjustment)
-    // If Cost Multiplier > 1 (Taipei), it eats into discretionary income.
-    // Logic: Reduce retention by (CostMult - 1) * RentBurden
-    const geoCostImpact = (geo.cost_multiplier - 1) * geo.rent_burden;
-    const geoRetention = Math.max(0.5, 1 - geoCostImpact); // Floor at 0.5 to avoid negative
+    // Geo Housing Impact (Using Physics Engine)
+    // This applies the regional housing burden (e.g., Taipei 67%) to the retention rate.
+    const geoRetention = EconomicPhysics.calculateGeoRetention(1.0, geo.id);
+
+    // Absolute Survival Floor (e.g. Taipei ~19k, Tainan ~14k)
+    const survivalFloor = EconomicPhysics.getSurvivalFloor(geo.id);
 
     // Final Disposable Income (True FCF)
-    const disposableIncome = Math.max(3000, Math.round(
-        (annualGross / 12) * baseRetention * familyRetention * geoRetention
-    ));
+    // Note: We subtract Survival Floor at the end to simulate "Hard Floor".
+    // If result < 0, it means Insolvent.
+    const rawDisposable = (afterTax * geoRetention * familyRetention) - survivalFloor;
+    const disposableIncome = Math.max(0, Math.round(rawDisposable));
     
     // Re-Classify Disposable Label based on True FCF
     let disposableLabel = "Stable";
-    if (disposableIncome < 15000) disposableLabel = "Survival";
-    else if (disposableIncome < 30000) disposableLabel = "Tight";
-    else if (disposableIncome > 70000) disposableLabel = "Affluent";
+    if (rawDisposable < 0) disposableLabel = "Insolvent"; // New State
+    else if (disposableIncome < 10000) disposableLabel = "Survival";
+    else if (disposableIncome < 25000) disposableLabel = "Tight";
+    else if (disposableIncome > 60000) disposableLabel = "Affluent";
     if (disposableIncome > 120000) disposableLabel = "Elite";
 
     // 6. Social Dynamics
@@ -377,13 +383,14 @@ export const getSocioEconomicContext = (
 
     // Update Narrative with New Dimensions
     const narrative = `
-    [MECE SOCIOLOGICAL PROFILE v4.4 (Contextual Grounding)]
+    [MECE SOCIOLOGICAL PROFILE v5.0 (Economic Physics)]
     - **Role**: ${roleInput} (${ageBucket})
     - **Context**: ${geo.label} / ${household.label} ${overrides ? '(Manual Override Active)' : ''}
-    - **Financials**:
-      - Est. Gross: NT$${(annualGross/10000).toFixed(1)}萬/yr
+    - **Financial Physics**:
+      - Est. Gross: NT$${Math.round(monthlyGross).toLocaleString()}/mo
+      - Survival Floor: NT$${survivalFloor.toLocaleString()} (${geo.id})
+      - Housing Pressure: ${Math.round(EconomicPhysics.getHousingPainThreshold(geo.id)*100)}%
       - **True Free Cash Flow**: ~NT$${disposableIncome.toLocaleString()}/mo (${disposableLabel})
-      - *Adjustment Factors*: Family(${household.discretionary_factor}), GeoCost(${geo.cost_multiplier}x)
     
     [SOCIAL DYNAMICS]
     - **Strategy**: ${socialTension.copingStrategy}
@@ -405,7 +412,7 @@ export const getSocioEconomicContext = (
         time_rules: laborDef.constraints.time_rules + (geo.commute_penalty > 1 ? ` (Heavy Commute: -${geo.commute_penalty}hr free time)` : ""),
         money_rules: realityCheck.coherence_level === 'Delusional' || realityCheck.coherence_level === 'Insolvent'
             ? realityCheck.correction_rules.spending_logic 
-            : `True FCF: ${disposableLabel}. Strategy: ${socialTension.copingStrategy}. Household: ${household.label}.`,
+            : `True FCF: ${disposableLabel} (NT$${disposableIncome}). Strategy: ${socialTension.copingStrategy}.`,
         keyword_injection: combinedKeywords
     };
 

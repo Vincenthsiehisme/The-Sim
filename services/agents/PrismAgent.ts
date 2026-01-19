@@ -5,6 +5,7 @@ import { trySafeJsonParse, cleanJsonString } from '../../utils/normalization';
 import { LLMGateway, retryWithBackoff } from '../infrastructure/LLMGateway';
 import { openDataService } from '../OpenDataService';
 import { PRISM_POLICY } from '../../data/prism_policy';
+import { EconomicPhysics } from '../../data/physics/coefficients';
 
 export interface MirrorResult {
     diagnosis: ProductDiagnosis;
@@ -89,6 +90,11 @@ export class PrismAgent {
           why_veto: upfrontShock > 15000 ? "High Upfront Shock" : "Category Norm"
       };
 
+      // Physics C: Resistance Score (for the average user - e.g., Stable income)
+      // This gives the LLM a baseline "Pain Level" to work with.
+      const estimatedDisposable = 35000; // Approx stable disposable
+      const resistanceScore = EconomicPhysics.calculatePurchaseResistance(monthlyBurden, estimatedDisposable);
+
       const competitor = {
           name: input.competitorName || "Market Leader",
           price: input.competitorPrice || "Unknown"
@@ -108,11 +114,14 @@ export class PrismAgent {
           }, 
           groundingContext 
       );
+      
+      // Inject Physics Context into Prompt (Hack for now, or add to buildProductMirrorPrompt signature properly later)
+      const enhancedPrompt = `${prompt}\n\n[PHYSICS ENGINE DATA]\n- Base Resistance Score (Stable Class): ${resistanceScore}/100\n- Instruction: If Resistance > 50, 'The Solid' persona MUST mention price pain. If > 80, 'The Stretcher' is highly unlikely to buy without strong leverage.`;
 
       const response = await ai.models.generateContent({
         model: model,
         contents: [
-          { role: 'user', parts: [{ text: PRODUCT_MIRROR_INSTRUCTION }, { text: prompt }] }
+          { role: 'user', parts: [{ text: PRODUCT_MIRROR_INSTRUCTION }, { text: enhancedPrompt }] }
         ],
         config: {
           tools: [{ googleSearch: {} }],
