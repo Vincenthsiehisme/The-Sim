@@ -1,8 +1,7 @@
 
-import { TAX_BRACKETS_2023, mapAgeToBracket, IncomeBracket } from '../data/open_data/income_distribution';
+import { TAX_BRACKETS_2023, mapAgeToBracket } from '../data/open_data/income_distribution';
 import { OCCUPATION_TIME_PRINTS, TimeProfile } from '../data/open_data/time_patterns';
-import { CONSUMPTION_ARCHETYPES } from '../data/open_data/cpi_weights';
-import { OCCUPATION_SALARY_DB, SalaryProfile, SalaryCurve, SalarySector } from '../data/open_data/occupational_salaries';
+import { OCCUPATION_SALARY_DB, SalaryProfile, SalarySector } from '../data/open_data/occupational_salaries';
 import { HOUSEHOLD_STRUCTURES, HouseholdProfile } from '../data/open_data/household_structure';
 import { GEO_ECONOMICS, GeoProfile } from '../data/open_data/geo_economics';
 import { MACRO_INDICATORS, CATEGORY_BASE_RATES } from '../data/open_data/macro_indicators';
@@ -19,50 +18,117 @@ export interface SocioEconomicCoordinates {
   consumption_archetype: string;
 }
 
-// === CAREER PHYSICS CONSTANTS ===
+// === CAREER CALCULUS CONSTANTS ===
 
-// 1. Age Curves (Multipliers relative to Base Entry Salary)
-const AGE_CURVES: Record<SalaryCurve, Record<string, number>> = {
-  // Tech/Finance: Explosive growth early, plateau late
-  steep: { '18-24': 0.8, '25-29': 1.2, '30-34': 1.8, '35-39': 2.3, '40-49': 2.5, '50+': 2.4 },
-  // Admin/Service: Slow linear growth (inflation adj)
-  flat:  { '18-24': 0.9, '25-29': 1.0, '30-34': 1.1, '35-39': 1.15, '40-49': 1.2, '50+': 1.2 },
-  // Professional: Steady compounding (Doctors, Lawyers)
-  linear:{ '18-24': 0.8, '25-29': 1.1, '30-34': 1.4, '35-39': 1.7, '40-49': 2.0, '50+': 2.2 },
-  // Labor: Peak physical condition ~30-40, then decline
-  bell:  { '18-24': 0.9, '25-29': 1.1, '30-34': 1.2, '35-39': 1.2, '40-49': 1.1, '50+': 0.9 } 
-};
-
-// 2. Geo-Sector Matrix (Where X Job pays more)
+// Geo-Sector Matrix (Nominal Wage Multiplier)
+// How different sectors pay in different regions relative to National Baseline (1.0)
 const GEO_SECTOR_MULTIPLIERS: Record<string, Record<SalarySector, number>> = {
-  'taipei_core':   { tech: 1.1, finance: 1.3, manufacturing: 1.0, service: 1.15, general: 1.1 }, // Finance Hub
-  'tech_hub':      { tech: 1.35, finance: 1.0, manufacturing: 1.2, service: 1.1, general: 1.0 }, // Hsinchu Effect
-  'commuter_belt': { tech: 1.0, finance: 1.0, manufacturing: 1.1, service: 1.0, general: 1.0 },
-  'comfort_zone':  { tech: 0.9, finance: 0.85, manufacturing: 0.95, service: 0.9, general: 0.85 }, // South
-  'rural_area':    { tech: 0.8, finance: 0.8, manufacturing: 0.8, service: 0.8, general: 0.8 }
+  'taipei_core':   { tech: 1.15, finance: 1.35, manufacturing: 1.0, service: 1.15, general: 1.15, healthcare: 1.1 },
+  'tech_hub':      { tech: 1.45, finance: 1.0, manufacturing: 1.25, service: 1.1, general: 1.05, healthcare: 1.0 }, // Hsinchu Tech is KING
+  'commuter_belt': { tech: 1.0, finance: 1.0, manufacturing: 1.1, service: 1.0, general: 1.0, healthcare: 1.0 },
+  'comfort_zone':  { tech: 0.9, finance: 0.85, manufacturing: 0.95, service: 0.95, general: 0.9, healthcare: 0.95 }, // South
+  'rural_area':    { tech: 0.8, finance: 0.8, manufacturing: 0.8, service: 0.85, general: 0.8, healthcare: 0.9 }
 };
 
 class OpenDataService {
   
   /**
-   * Detect Management Level from Role String
-   * Returns a multiplier boost (1.0 = Individual Contributor)
+   * 1. Rank & Title Inflation Logic
+   * Detects "Management" or "Seniority" keywords to adjust multiplier.
+   * Includes safeguards for inflated titles (e.g. "Manager" in Sales).
    */
-  private detectManagementMultiplier(role: string): number {
+  private detectRankMultiplier(role: string, sector: SalarySector): number {
       const r = role.toLowerCase();
+      
       // Tier 1: C-Level / VP / Director / Founder
       if (r.match(/ceo|cto|cfo|vp|director|總監|處長|創辦人|founder|總經理|副總/)) return 2.5;
-      // Tier 2: Manager / Lead / Head
-      if (r.match(/manager|lead|head|經理|課長|主任|組長|主管|店長/)) return 1.5;
-      // Tier 3: Senior / Lead IC
-      if (r.match(/senior|staff|principal|資深|領班/)) return 1.2;
       
+      // Tier 2: Manager / Head (With Sector Safeguard)
+      if (r.match(/manager|lead|head|經理|課長|主任|組長|主管|店長/)) {
+          // Safeguard: In Sales/Finance, "Manager" is often just a senior rank, not real management
+          if ((sector === 'finance' || sector === 'general') && !r.match(/department|部|處|senior/)) {
+              return 1.25; // Soft boost
+          }
+          return 1.6; // Real management boost
+      }
+      
+      // Tier 3: Senior / Lead IC
+      if (r.match(/senior|staff|principal|資深|領班/)) return 1.3;
+      
+      // Tier 4: Junior / Entry (Negative Multiplier handled in Experience Calc)
       return 1.0;
   }
 
   /**
-   * [NEW] Dynamic Salary Calculator (Career Physics)
-   * Replaces static lookup with physics-based calculation.
+   * 2. Experience Calculator (The "t" variable)
+   * Calculates effective years of experience based on Age and Title Semantic Cap.
+   */
+  private calculateExperience(ageStr: string, role: string): number {
+      let age = 30; // Default
+      if (ageStr.includes('18')) age = 22;
+      else if (ageStr.includes('25')) age = 27;
+      else if (ageStr.includes('30')) age = 32;
+      else if (ageStr.includes('35')) age = 37;
+      else if (ageStr.includes('40')) age = 45;
+      else if (ageStr.includes('50')) age = 55;
+
+      // Base Experience: Age - 22 (Entry)
+      let t = Math.max(0, age - 22);
+
+      // Semantic Caps (Safety Valve)
+      const r = role.toLowerCase();
+      if (r.match(/junior|assistant|entry|助理|工讀|學徒/)) {
+          t = Math.min(t, 2); // Force junior exp even if old
+      }
+      if (r.match(/senior|資深|lead/)) {
+          t = Math.max(t, 5); // Force minimum seniority
+      }
+
+      return t;
+  }
+
+  /**
+   * 3. The Math Core: Calculate Experience Multiplier (M_exp)
+   */
+  private calculateCurveMultiplier(t: number, profile: SalaryProfile): number {
+      const { type, growth_rate, max_cap } = profile.curve;
+      let m = 1.0;
+
+      switch (type) {
+          case 'logarithmic':
+              // y = 1 + k * ln(t + 1)
+              // Grows fast initially then plateaus (Admin, Service)
+              m = 1 + growth_rate * Math.log(t + 1);
+              break;
+          case 'linear':
+              // y = 1 + k * t
+              // Steady growth (Gov, Traditional)
+              m = 1 + growth_rate * t;
+              break;
+          case 'exponential':
+              // y = (1 + r)^t
+              // Compound growth (Tech, Finance)
+              m = Math.pow(1 + growth_rate, t);
+              break;
+          case 'bell':
+              // Gaussian-ish: Peaking at 'growth_rate' years (e.g. 15), then decaying
+              // Using a simplified bell: 1 + max_boost * e^(-(t-mu)^2 / 2sigma^2)
+              const peak = growth_rate; // Reuse field as 'Peak Year'
+              const sigma = 8; // Width of peak
+              const maxBoost = max_cap - 1;
+              const bellFactor = Math.exp(-Math.pow(t - peak, 2) / (2 * sigma * sigma));
+              m = 1 + maxBoost * bellFactor;
+              
+              // Hard Decay for older physical labor
+              if (t > 25) m *= 0.9;
+              return m; // Bell curve handles its own cap naturally usually, but we safeguard below
+      }
+
+      return Math.min(m, max_cap); // Apply Hard Ceiling
+  }
+
+  /**
+   * [NEW] Dynamic Salary Calculator (Career Calculus)
    */
   public calculateDynamicSalary(
       jobKey: string, 
@@ -74,43 +140,42 @@ class OpenDataService {
       const profile = OCCUPATION_SALARY_DB.data[jobKey];
       if (!profile) return null;
 
-      // 1. Base Salary
-      const base = profile.base_monthly;
-
-      // 2. Age Multiplier (The Curve)
-      const ageKey = mapAgeToBracket(ageRange);
-      const mAge = AGE_CURVES[profile.curve_type][ageKey] || 1.0;
-
-      // 3. Geo-Sector Multiplier (The Hsinchu Fix)
-      // Default to general if geo not found
-      const geoMap = GEO_SECTOR_MULTIPLIERS[geoId] || GEO_SECTOR_MULTIPLIERS['commuter_belt']; 
+      // 1. Calculate Variables
+      const t = this.calculateExperience(ageRange, roleInput);
+      
+      // 2. Multipliers
+      const mExp = this.calculateCurveMultiplier(t, profile);
+      const mRank = this.detectRankMultiplier(roleInput, profile.sector_type);
+      
+      const geoMap = GEO_SECTOR_MULTIPLIERS[geoId] || GEO_SECTOR_MULTIPLIERS['commuter_belt'];
       const mGeo = geoMap[profile.sector_type] || 1.0;
 
-      // 4. Management Multiplier (The Title Inflation Fix)
-      const mMgmt = this.detectManagementMultiplier(roleInput);
-
-      // Calculation
-      const estimatedMonthly = Math.round(base * mAge * mGeo * mMgmt);
+      // 3. Final Calculation
+      // Formula: Base * Experience * Rank * Geo
+      const estimatedMonthly = Math.round(profile.base_monthly * mExp * mRank * mGeo);
       
       // Annual Calculation (Base * 12 + Bonus)
       // Bonus is also affected by Geo/Mgmt (e.g. Hsinchu Tech bonus is huge)
-      const bonusMonths = profile.bonus_months * (mGeo > 1.1 ? 1.2 : 1.0) * (mMgmt > 1.2 ? 1.2 : 1.0);
-      const annual = Math.round(estimatedMonthly * (12 + bonusMonths));
+      // Tech bonuses in Hsinchu get a boost
+      let bonusMult = 1.0;
+      if (profile.sector_type === 'tech' && geoId === 'tech_hub') bonusMult = 1.3;
+      if (profile.sector_type === 'finance' && geoId === 'taipei_core') bonusMult = 1.2;
+      
+      const adjustedBonusMonths = profile.bonus_months * bonusMult * (mRank > 1.2 ? 1.2 : 1.0);
+      const annual = Math.round(estimatedMonthly * (12 + adjustedBonusMonths));
 
       // Volatility Inference
       let volatility: 'Low' | 'Med' | 'High' = 'Low';
-      if (bonusMonths > 4) volatility = 'High';
-      else if (bonusMonths > 2) volatility = 'Med';
+      if (adjustedBonusMonths > 5) volatility = 'High';
+      else if (adjustedBonusMonths > 2.5) volatility = 'Med';
 
       return { monthly: estimatedMonthly, annual, volatility };
   }
 
   /**
    * getEstimatedSalary (Legacy Wrapper)
-   * Kept for compatibility, but now uses the new dynamic engine internally if possible.
    */
   public getEstimatedSalary(jobKey: string, ageKey: string): number | null {
-      // Use default Geo (Taipei/Commuter) and Standard Role for simple lookup
       const result = this.calculateDynamicSalary(jobKey, ageKey, 'commuter_belt', '');
       return result ? result.annual : null;
   }

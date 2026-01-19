@@ -333,7 +333,7 @@ export const getSocioEconomicContext = (
         geo = openDataService.inferGeoProfile(roleInput, incomeModifierLabel);
     }
 
-    // 3. DYNAMIC SALARY CALCULATION (PHYSICS ENGINE v2.0)
+    // 3. DYNAMIC SALARY CALCULATION (CAREER CALCULUS ENGINE v3.0)
     // Priority: Real Dynamic Salary > Tax Bracket Estimate
     let monthlyGross = fallbackAmount;
     let salaryVolatility = 'Low';
