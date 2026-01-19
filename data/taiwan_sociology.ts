@@ -258,7 +258,7 @@ const detectRealityCheck = (
 /**
  * Calculates the "Sociological Coordinates" using the new Open Data Layer.
  * UPDATED v4.4: Supports "Priority Override" for Context Settings.
- * UPDATED v5.0: Integrated Economic Physics for True FCF calculation.
+ * UPDATED v5.2: Integrated Career Physics (Dynamic Salary) + Additive Expense Stack.
  */
 export const getSocioEconomicContext = (
     ageBucket: string, 
@@ -294,16 +294,8 @@ export const getSocioEconomicContext = (
     };
 
     const multiplier = sectorDef.income_multiplier || 1.0;
-    const baseAmount = Math.round(stats.median * multiplier);
-
-    // 3. HARD DATA OVERRIDE (Gross Income)
-    let annualGross = baseAmount * EconomicPhysics.CONSTANTS.MONTHS_PER_YEAR;
-    if (salaryKey) {
-        const realAnnual = openDataService.getEstimatedSalary(salaryKey, ageKey);
-        if (realAnnual) {
-            annualGross = (realAnnual * 0.8) + (annualGross * 0.2);
-        }
-    }
+    // Fallback base amount if no dynamic salary is found
+    const fallbackAmount = Math.round(stats.median * multiplier);
 
     // 4. APPLY USER MODIFIER (Relative Financial Background)
     let disposableMultiplier = 1.0;
@@ -341,29 +333,46 @@ export const getSocioEconomicContext = (
         geo = openDataService.inferGeoProfile(roleInput, incomeModifierLabel);
     }
 
-    // 5. TRUE FREE CASH FLOW CALCULATION (PHYSICS ENGINE v2.0)
-    // Formula: (MonthlyGross * TaxRate * GeoHousingRetention * FamilyRetention) - SurvivalFloor
-    
-    const monthlyGross = (annualGross / 12) * disposableMultiplier;
-    
-    // Effective tax/burden base (0.88 from physics constants)
-    const afterTax = monthlyGross * EconomicPhysics.CONSTANTS.BASE_TAX_RETENTION;
-    
-    // Family Impact (Discretionary factor from household structure)
-    // E.g. Sandwich class = 0.25 (Very low discretionary)
-    const familyRetention = household.discretionary_factor;
+    // 3. DYNAMIC SALARY CALCULATION (PHYSICS ENGINE v2.0)
+    // Priority: Real Dynamic Salary > Tax Bracket Estimate
+    let monthlyGross = fallbackAmount;
+    let salaryVolatility = 'Low';
 
-    // Geo Housing Impact (Using Physics Engine)
-    // This applies the regional housing burden (e.g., Taipei 67%) to the retention rate.
-    const geoRetention = EconomicPhysics.calculateGeoRetention(1.0, geo.id);
+    if (salaryKey) {
+        const dynamicSalary = openDataService.calculateDynamicSalary(
+            salaryKey, 
+            ageKey, 
+            geo.id, 
+            roleInput
+        );
+        if (dynamicSalary) {
+            monthlyGross = dynamicSalary.monthly;
+            salaryVolatility = dynamicSalary.volatility;
+        }
+    } else {
+        // Fallback Logic: Tax Bracket Median * Sector Multiplier
+        monthlyGross = fallbackAmount;
+    }
 
-    // Absolute Survival Floor (e.g. Taipei ~19k, Tainan ~14k)
-    const survivalFloor = EconomicPhysics.getSurvivalFloor(geo.id);
+    // Apply User Modifier (e.g. Wealthy Family)
+    monthlyGross = monthlyGross * disposableMultiplier;
 
-    // Final Disposable Income (True FCF)
-    // Note: We subtract Survival Floor at the end to simulate "Hard Floor".
-    // If result < 0, it means Insolvent.
-    const rawDisposable = (afterTax * geoRetention * familyRetention) - survivalFloor;
+    // 5. TRUE FREE CASH FLOW CALCULATION (PHYSICS ENGINE v2.1)
+    // Updated to use Additive Expense Stack logic.
+    // Income * (1 - (Tax + Housing + Family)) - Survival
+    
+    // Detect Home Ownership heuristic:
+    // If "Owner", "Rich", "Elite", or Age > 50, assume mortgage (full burden).
+    // Else assume Rent (discounted burden).
+    const isHomeOwner = roleInput.includes('房東') || roleInput.includes('有房') || ageKey === '50+' || incomeModifierLabel === 'Elite';
+
+    const rawDisposable = EconomicPhysics.calculateTrueDisposableIncome(
+        monthlyGross,
+        geo.id,
+        household.discretionary_factor,
+        isHomeOwner
+    );
+
     const disposableIncome = Math.max(0, Math.round(rawDisposable));
     
     // Re-Classify Disposable Label based on True FCF
@@ -381,15 +390,19 @@ export const getSocioEconomicContext = (
     const realityCheck = detectRealityCheck(ageBucket, roleInput, disposableLabel, labor, stats, evidence);
     realityCheck.social_tension = socialTension;
 
+    // Get Raw Burdens for Narrative
+    const housingBurden = Math.round(EconomicPhysics.getHousingPainThreshold(geo.id) * 100);
+    const survivalFloor = EconomicPhysics.getSurvivalFloor(geo.id);
+
     // Update Narrative with New Dimensions
     const narrative = `
-    [MECE SOCIOLOGICAL PROFILE v5.0 (Economic Physics)]
+    [MECE SOCIOLOGICAL PROFILE v5.2 (Career Physics)]
     - **Role**: ${roleInput} (${ageBucket})
     - **Context**: ${geo.label} / ${household.label} ${overrides ? '(Manual Override Active)' : ''}
     - **Financial Physics**:
-      - Est. Gross: NT$${Math.round(monthlyGross).toLocaleString()}/mo
+      - Est. Gross: NT$${Math.round(monthlyGross).toLocaleString()}/mo (Volatility: ${salaryVolatility})
       - Survival Floor: NT$${survivalFloor.toLocaleString()} (${geo.id})
-      - Housing Pressure: ${Math.round(EconomicPhysics.getHousingPainThreshold(geo.id)*100)}%
+      - Geo Housing Index: ${housingBurden}% (Rent Discount Applied: ${!isHomeOwner})
       - **True Free Cash Flow**: ~NT$${disposableIncome.toLocaleString()}/mo (${disposableLabel})
     
     [SOCIAL DYNAMICS]
